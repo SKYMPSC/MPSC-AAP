@@ -1,162 +1,235 @@
+import time
 import streamlit as st
 from google import genai
 from google.genai import types
 from pydantic import BaseModel, Field
-import pypdf
+from pypdf import PdfReader
 
-st.set_page_config(page_title="SkyMPSC AI Tutor", page_icon="📚", layout="centered")
+st.set_page_config(page_title="SkyMPSC & SAAM AI", page_icon="🤖", layout="centered")
 
+# --- डेटा स्ट्रक्चर (MPSC टेस्ट के लिए) ---
 class OptionDetail(BaseModel):
-    option_text: str = Field(description="ऑप्शन का पूरा टेक्स्ट (जैसे: अ) केवल अ और ब)")
-    is_correct: bool = Field(description="क्या यह ऑप्शन सही है? (True/False)")
-    reason: str = Field(description="यह ऑप्शन क्यों सही है या किस हिसाब से गलत है, इसका स्पष्टीकरण")
+    text: str = Field(description="विकल्प का टेक्स्ट")
+    explanation: str = Field(description="यह विकल्प सही या गलत क्यों है, इसकी संक्षिप्त व्याख्या")
 
-class MPSCQuestion(BaseModel):
-    question_text: str = Field(description="MPSC PYQ पैटर्न का प्रश्न (मल्टी-स्टेटमेंट या फैक्चुअल)")
-    pyq_reference: str = Field(description="यह प्रश्न किस परीक्षा/वर्ष के PYQ पैटर्न या संभावित टॉपिक पर आधारित है")
-    options: list[OptionDetail] = Field(description="कुल 4 ऑप्शंस की लिस्ट")
-    overall_concept: str = Field(description="इस प्रश्न के पीछे का मुख्य कॉन्सेप्ट और परीक्षा के लिए टिप")
+class QuestionItem(BaseModel):
+    question: str = Field(description="MPSC पैटर्न का प्रश्न (विधान अ, ब, क शैली में)")
+    options: list[OptionDetail] = Field(description="ठीक 4 विकल्प")
+    correct_index: int = Field(description="सही विकल्प का इंडेक्स (0, 1, 2, या 3)")
 
 class MPSCTest(BaseModel):
-    questions: list[MPSCQuestion]
+    questions: list[QuestionItem]
 
-def extract_text_from_pdfs(uploaded_files):
-    combined_text = ""
-    for file in uploaded_files:
-        reader = pypdf.PdfReader(file)
-        for page in reader.pages:
-            text = page.extract_text()
-            if text:
-                combined_text += text + "\n"
-    return combined_text[:150000]
-
-st.title("🎓 SkyMPSC AI Personal Tutor")
-st.caption("PYQ पैटर्न टेस्ट, संभावित प्रश्न, लाइव GK और विस्तृत स्पष्टीकरण")
-
-with st.expander("⚙️ 1. सेटिंग्स और PYQ पेपर्स अपलोड करें", expanded=True):
-    api_key = st.text_input("अपनी Gemini API Key डालें:", type="password")
-    uploaded_pdfs = st.file_uploader(
-        "MPSC के पुराने प्रश्नपत्र (PDF) अपलोड करें (वैकल्पिक):",
-        type=["pdf"],
-        accept_multiple_files=True
-    )
-    if uploaded_pdfs:
-        st.success(f"{len(uploaded_pdfs)} PDF फाइलें लोड हो गई हैं!")
-
-    exam_type = st.selectbox("परीक्षा चुनें:", [
-        "MPSC Rajyaseva (राज्यसेवा)",
-        "MPSC Combine Group B & C (संयुक्त पूर्व परीक्षा)",
-        "MPSC Technical / Other Exams"
-    ])
-    subject = st.text_input("विषय / टॉपिक (जैसे: महाराष्ट्राचा इतिहास, राज्यघटना, चालू घडामोडी):", value="भारतीय राज्यघटना (Indian Polity)")
-    question_mode = st.radio("प्रश्नों का प्रकार:", [
-        "PYQ पैटर्न + नए संभावित प्रश्न (Expected Questions)",
-        "सिर्फ अपलोड किए गए PYQ पेपर्स पर आधारित",
-        "लाइव चालू घडामोडी (Current Affairs & GK)"
-    ])
-    language = st.selectbox("भाषा चुनें:", ["मराठी (Marathi)", "हिंदी (Hindi)", "English"])
-    num_questions = st.slider("प्रश्नों की संख्या:", min_value=3, max_value=15, value=5)
-
+# --- मेमोरी और सेशन स्टेट (SAAM के सीखने और याद रखने के लिए) ---
 if "quiz_data" not in st.session_state:
     st.session_state.quiz_data = None
-if "user_answers" not in st.session_state:
-    st.session_state.user_answers = {}
+if "saam_messages" not in st.session_state:
+    st.session_state.saam_messages = [
+        {
+            "role": "assistant",
+            "content": "नमस्कार! मैं **SAAM** हूँ—आपका पर्सनल AI असिस्टेंट। आप मुझसे मराठी, हिंदी या English में बिल्कुल एक दोस्त की तरह बात कर सकते हैं। बताइए, आज मैं आपके लिए क्या करूँ? (जैसे: नई सरकारी भर्ती खोजें, मेरा टाइमटेबल बनाएं, या किसी विषय पर चर्चा करें)"
+        }
+    ]
+if "saam_memory" not in st.session_state:
+    st.session_state.saam_memory = []
+if "tasks" not in st.session_state:
+    st.session_state.tasks = []
 
-if st.button("🚀 नया टेस्ट शुरू करें", type="primary", use_container_width=True):
-    if not api_key:
-        st.error("⚠️ कृपया ऊपर सेटिंग्स में अपनी Gemini API Key डालें।")
-    else:
-        with st.spinner("AI आपके लिए MPSC पैटर्न के प्रश्न तैयार कर रहा है..."):
-            try:
-                client = genai.Client(api_key=api_key)
-                pyq_context = extract_text_from_pdfs(uploaded_pdfs) if uploaded_pdfs else ""
+# --- हेडर और API Key ---
+st.title("🚀 SkyMPSC & SAAM AI")
+api_key = st.text_input("🔑 अपनी Gemini API Key डालें:", type="password")
 
-                prompt = f"""
-                तुम एक अनुभवी MPSC (Maharashtra Public Service Commission) शिक्षक और पेपर सेटर हो।
-                परीक्षा: {exam_type}
-                विषय: {subject}
-                प्रश्नों का प्रकार: {question_mode}
-                भाषा: {language}
-                प्रश्नों की संख्या: {num_questions}
+# --- दो मुख्य टैब: MPSC टेस्ट और SAAM असिस्टेंट ---
+tab1, tab2 = st.tabs(["📚 MPSC AI Tutor", "🤖 SAAM (पर्सनल असिस्टेंट & जॉब अलर्ट)"])
 
-                निर्देश:
-                1. यदि नीचे PYQ Context दिया है, तो उसके स्तर और पैटर्न का गहराई से उपयोग करो। साथ ही अपने ज्ञान से MPSC के पिछले वर्षों के पैटर्न के आधार पर नए संभावित (Expected) और कठिन प्रश्न भी बनाओ।
-                2. MPSC की असली शैली के अनुसार 'विधान अ, ब, क' (Multi-statement), 'जोड्या जुळवा', और वैचारिक (Analytical) प्रश्न बनाओ।
-                3. कुल {num_questions} प्रश्न बनाओ और हर प्रश्न के 4 ऑप्शन दो।
-                4. सबसे ज़रूरी: हर ऑप्शन (सही और गलत दोनों) के लिए स्पष्ट कारण (reason) लिखो कि वह ऑप्शन सही क्यों है और बाकी गलत ऑप्शन किस तथ्य के कारण गलत हैं।
-                5. पूरा आउटपुट {language} भाषा में लिखो।
+# ==========================================
+# TAB 1: MPSC AI TUTOR
+# ==========================================
+with tab1:
+    uploaded_files = st.file_uploader(
+        "📄 पुराने प्रश्नपत्र या नोट्स की PDF अपलोड करें (वैकल्पिक)",
+        type=["pdf"],
+        accept_multiple_files=True,
+    )
 
-                PYQ Context:
-                {pyq_context if pyq_context else "कोई PDF अपलोड नहीं है, वास्तविक MPSC PYQ पैटर्न और लाइव सामान्य ज्ञान का उपयोग करें।"}
-                """
+    exam_type = st.selectbox(
+        "परीक्षा चुनें:",
+        ["MPSC Rajyaseva (राज्यसेवा)", "MPSC Combine Group B & C (संयुक्त गट ब व क)", "MPSC Technical / Engineering"],
+    )
 
-                            import time
-            for m in ["gemini-3.5-flash-lite", "gemini-3.8-flash"]:
+    subject = st.text_input(
+        "विषय / टॉपिक (जैसे: महाराष्ट्राचा इतिहास, राज्यघटना, चालू घडामोडी):",
+        value="भारतीय राज्यघटना (Indian Polity)",
+    )
+
+    question_mode = st.radio(
+        "प्रश्नों का प्रकार:",
+        [
+            "PYQ पैटर्न + नए संभावित प्रश्न (Expected Questions)",
+            "सिर्फ अपलोड किए गए PYQ पेपर्स पर आधारित",
+            "लाइव चालू घडामोडी (Current Affairs & GK)",
+        ],
+    )
+
+    language = st.selectbox("भाषा चुनें:", ["मराठी (Marathi)", "हिंदी (Hindi)", "English"])
+    num_questions = st.slider("प्रश्नों की संख्या:", min_value=1, max_value=10, value=3)
+
+    if st.button("🚀 नया टेस्ट शुरू करें", type="primary", use_container_width=True):
+        if not api_key:
+            st.warning("⚠️ कृपया सबसे ऊपर अपनी Gemini API Key डालें और Enter दबाएं।")
+        else:
+            with st.spinner("AI आपके लिए MPSC पैटर्न के प्रश्न तैयार कर रहा है..."):
                 try:
-                    response = client.models.generate_content(
-                        model=m,
-                        contents=prompt,
-                        config=types.GenerateContentConfig(
-                            response_mime_type="application/json",
-                            response_schema=MPSCTest,
-                            temperature=0.4,
-                        ),
-                    )
-                    break
-                except Exception as err:
-                    if "503" in str(err):
-                        time.sleep(3)
-                        continue
-                    raise err
+                    pyq_context = ""
+                    if uploaded_files:
+                        for f in uploaded_files:
+                            reader = PdfReader(f)
+                            for page in reader.pages[:8]:
+                                pyq_context += (page.extract_text() or "") + "\n"
+                        pyq_context = pyq_context[:12000]
 
+                    prompt = f"""तुम एक अनुभवी MPSC (Maharashtra Public Service Commission) शिक्षक हो।
+परीक्षा: {exam_type}
+विषय: {subject}
+प्रश्नों का प्रकार: {question_mode}
+भाषा: {language}
+प्रश्नों की संख्या: {num_questions}
 
-                st.session_state.quiz_data = MPSCTest.model_validate_json(response.text)
-                st.session_state.user_answers = {}
-                st.rerun()
+निर्देश:
+1. यदि नीचे PYQ Context दिया है, तो उसके स्तर और पैटर्न का उपयोग करो।
+2. MPSC की असली शैली के अनुसार 'विधान अ, ब, क' वाले विश्लेषणात्मक प्रश्न बनाओ।
+3. कुल {num_questions} प्रश्न बनाओ और हर प्रश्न के ठीक 4 विकल्प दो।
+4. हर ऑप्शन (सही और गलत दोनों) की संक्षिप्त व्याख्या दो।
+5. पूरा आउटपुट {language} भाषा में लिखो।
 
-            except Exception as e:
-                st.error(f"समस्या आई: {e}")
+PYQ Context:
+{pyq_context if pyq_context else "कोई PDF अपलोड नहीं की गई है।"}
+"""
+                    client = genai.Client(api_key=api_key.strip())
+                    response = None
+                    last_error = None
 
-if st.session_state.quiz_data:
-    st.divider()
-    questions = st.session_state.quiz_data.questions
-    correct_count = 0
+                    for model_name in ["gemini-3.5-flash-lite", "gemini-3.8-flash", "gemini-3.5-flash"]:
+                        for attempt in range(2):
+                            try:
+                                response = client.models.generate_content(
+                                    model=model_name,
+                                    contents=prompt,
+                                    config=types.GenerateContentConfig(
+                                        response_mime_type="application/json",
+                                        response_schema=MPSCTest,
+                                        temperature=0.4,
+                                    ),
+                                )
+                                break
+                            except Exception as err:
+                                last_error = err
+                                if "503" in str(err) or "UNAVAILABLE" in str(err):
+                                    time.sleep(3)
+                                    continue
+                                break
+                        if response is not None:
+                            break
 
-    for idx, q in enumerate(questions):
-        st.subheader(f"प्रश्न {idx + 1}")
-        st.caption(f"📌 पैटर्न/संदर्भ: {q.pyq_reference}")
-        st.markdown(f"**{q.question_text}**")
+                    if response is None:
+                        raise last_error
 
-        option_texts = [opt.option_text for opt in q.options]
-        selected_option = st.radio(
-            f"उत्तर चुनें (प्रश्न {idx + 1}):",
-            options=option_texts,
-            index=None,
-            key=f"radio_{idx}"
-        )
+                    st.session_state.quiz_data = MPSCTest.model_validate_json(response.text)
+                    st.rerun()
 
-        if selected_option is not None:
-            st.session_state.user_answers[idx] = selected_option
-            chosen_opt = next(opt for opt in q.options if opt.option_text == selected_option)
-            correct_opt = next(opt for opt in q.options if opt.is_correct)
+                except Exception as e:
+                    st.error(f"समस्या आई: {e}")
 
-            if chosen_opt.is_correct:
-                correct_count += 1
-                st.success("✅ **सही जवाब!**")
-            else:
-                st.error(f"❌ **गलत जवाब!** आपने चुना: *{selected_option}*")
-                st.info(f"✔️ **सही जवाब:** {correct_opt.option_text}")
-
-            with st.expander("📖 पूरा स्पष्टीकरण देखें (सही और गलत क्यों है)", expanded=True):
-                st.markdown(f"**💡 मुख्य कॉन्सेप्ट:** {q.overall_concept}")
-                st.markdown("---")
-                for opt in q.options:
-                    if opt.is_correct:
-                        st.markdown(f"🟢 **{opt.option_text}** — *(सही क्यों है)*: {opt.reason}")
-                    else:
-                        st.markdown(f"🔴 **{opt.option_text}** — *(गलत क्यों है)*: {opt.reason}")
-
+    if st.session_state.quiz_data:
         st.divider()
+        questions = st.session_state.quiz_data.questions
+        correct_count = 0
 
-    if len(st.session_state.user_answers) > 0:
-        st.success(f"📊 **आपका स्कोर:** {correct_count} / {len(questions)} सही")
+        for idx, q in enumerate(questions):
+            st.subheader(f"प्रश्न {idx + 1}")
+            st.write(q.question)
+
+            option_labels = [opt.text for opt in q.options]
+            choice = st.radio(
+                f"अपना उत्तर चुनें (प्रश्न {idx + 1}):",
+                option_labels,
+                index=None,
+                key=f"q_{idx}",
+            )
+
+            if choice is not None:
+                selected_idx = option_labels.index(choice)
+                if selected_idx == q.correct_index:
+                    st.success("✅ सही उत्तर!")
+                    correct_count += 1
+                else:
+                    st.error(f"❌ गलत उत्तर! सही विकल्प है: {option_labels[q.correct_index]}")
+
+                with st.expander("📖 सभी विकल्पों का स्पष्टीकरण देखें", expanded=True):
+                    for o_idx, opt in enumerate(q.options):
+                        mark = "✔️" if o_idx == q.correct_index else "✖️"
+                        st.markdown(f"**{mark} {opt.text}:** {opt.explanation}")
+
+            st.divider()
+
+        st.info(f"📊 वर्तमान स्कोर: **{correct_count} / {len(questions)}**")
+
+# ==========================================
+# TAB 2: SAAM (PERSONAL AI ASSISTANT)
+# ==========================================
+with tab2:
+    st.subheader("🤖 SAAM — आपका स्मार्ट सहायक")
+    
+    # त्वरित जॉब अलर्ट और काम के बटन
+    col1, col2 = st.columns(2)
+    with col1:
+        check_jobs = st.button("🔔 नई सरकारी भर्ती (Gov Vacancy) चेक करें", use_container_width=True)
+    with col2:
+        clear_chat = st.button("🧹 नई बातचीत शुरू करें", use_container_width=True)
+
+    if clear_chat:
+        st.session_state.saam_messages = [st.session_state.saam_messages[0]]
+        st.rerun()
+
+    # यूज़र की यादें / पसंद दिखाना (जो SAAM ने सीखा है)
+    with st.expander("🧠 SAAM की मेमोरी और आपके काम (To-Do List)"):
+        new_task = st.text_input("कोई नया काम या रिमाइंडर जोड़ें:")
+        if st.button("➕ जोड़ें") and new_task:
+            st.session_state.tasks.append(new_task)
+            st.session_state.saam_memory.append(f"यूज़र का काम: {new_task}")
+            st.success("काम जोड़ दिया गया!")
+        if st.session_state.tasks:
+            for t in st.session_state.tasks:
+                st.write(f"• {t}")
+        else:
+            st.caption("अभी कोई काम नहीं जोड़ा गया है।")
+
+    # पुरानी बातचीत दिखाएं
+    for msg in st.session_state.saam_messages:
+        with st.chat_message(msg["role"]):
+            st.markdown(msg["content"])
+
+    # यूज़र का नया संदेश या जॉब अलर्ट बटन
+    user_prompt = st.chat_input("SAAM से कुछ भी कहें या पूछें...")
+    if check_jobs:
+        user_prompt = "आज की तारीख तक महाराष्ट्र (MPSC, महाभरती) और केंद्र सरकार (SSC, UPSC, Banking) की सबसे नई और ताज़ा सरकारी नौकरी (Government Vacancies) की पूरी लिस्ट, अंतिम तारीख और योग्यता बताओ।"
+
+    if user_prompt:
+        if not api_key:
+            st.warning("⚠️ कृपया ऊपर अपनी Gemini API Key डालें।")
+        else:
+            st.session_state.saam_messages.append({"role": "user", "content": user_prompt})
+            with st.chat_message("user"):
+                st.markdown(user_prompt)
+
+            with st.chat_message("assistant"):
+                with st.spinner("SAAM सोच रहा है और जानकारी ढूंढ रहा है..."):
+                    try:
+                        client = genai.Client(api_key=api_key.strip())
+                        
+                        # SAAM का इंसानी व्यवहार और सीखने वाला व्यक्तित्व
+                        memory_text = "\n".join(st.session_state.saam_memory[-10:])
+                        system_instruction = f"""तुम्हारा नाम SAAM है। तुम यूज़र के सबसे भरोसेमंद, समझदार और इंसानों की तरह बात करने वाले पर्सनल AI असिस्टेंट हो।
+तुम्हारे नियम:
+1. यूज़र जिस भाषा और लहजे (मराठी, हिंदी, Hinglish या English) में बात करे, तुम भी बिल्कुल उसी दोस्ताना और स्वाभाविक (Human-like) अंदाज़ में जवाब दो।
+2. यूज़र की पसंद, व्यवहार और पिछली बातों को ध्यान में रखकर खुद को ढालते रहो।
