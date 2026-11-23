@@ -90,15 +90,25 @@ if st.button("🚀 नया टेस्ट शुरू करें", type="p
                 {pyq_context if pyq_context else "कोई PDF अपलोड नहीं है, वास्तविक MPSC PYQ पैटर्न और लाइव सामान्य ज्ञान का उपयोग करें।"}
                 """
 
-                response = client.models.generate_content(
-                    model="gemini-3.5-flash-lite",
-                    contents=prompt,
-                    config=types.GenerateContentConfig(
-                        response_mime_type="application/json",
-                        response_schema=MPSCTest,
-                        temperature=0.4,
-                    ),
-                )
+                            import time
+            for m in ["gemini-3.5-flash-lite", "gemini-3.8-flash"]:
+                try:
+                    response = client.models.generate_content(
+                        model=m,
+                        contents=prompt,
+                        config=types.GenerateContentConfig(
+                            response_mime_type="application/json",
+                            response_schema=MPSCTest,
+                            temperature=0.4,
+                        ),
+                    )
+                    break
+                except Exception as err:
+                    if "503" in str(err):
+                        time.sleep(3)
+                        continue
+                    raise err
+
 
                 st.session_state.quiz_data = MPSCTest.model_validate_json(response.text)
                 st.session_state.user_answers = {}
