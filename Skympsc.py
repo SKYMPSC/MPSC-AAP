@@ -8,11 +8,13 @@ from pypdf import PdfReader
 st.set_page_config(page_title="SkyMPSC & SAAM AI", page_icon="📚", layout="centered")
 
 class OptionDetail(BaseModel):
-    text: str = Field(description="विकल्प का टेक्स्ट")
+    text: str = Field(description="विकल्प का टेक्स्ट (बिना A/B/C प्रीफिक्स के)")
     explanation: str = Field(description="यह विकल्प सही या गलत क्यों है, इसकी संक्षिप्त व्याख्या")
 
 class QuestionItem(BaseModel):
-    question: str = Field(description="MPSC पैटर्न का प्रश्न (विधान अ, ब, क शैली में)")
+    question_intro: str = Field(description="प्रश्न की मुख्य पहली लाइन (जैसे: खालील विधाने विचारात घ्या:)")
+    statements: list[str] = Field(description="विधान अ, ब, क की अलग-अलग सूची। यदि विधान नहीं हैं तो खाली रखें []")
+    question_ask: str = Field(description="अंतिम सवाल (जैसे: वरीलपैकी कोणते विधान बरोबर आहे?)")
     options: list[OptionDetail] = Field(description="ठीक 4 विकल्प")
     correct_index: int = Field(description="सही विकल्प का इंडेक्स (0, 1, 2, या 3)")
 
@@ -54,10 +56,7 @@ with tab1:
         "परीक्षा चुनें:",
         ["MPSC Rajyaseva (राज्यसेवा)", "MPSC Combine Group B & C (संयुक्त गट ब व क)", "MPSC Technical / Engineering"],
     )
-    subject = st.text_input(
-        "विषय / टॉपिक:",
-        value="भारतीय राज्यघटना (Indian Polity)",
-    )
+    subject = st.text_input("विषय / टॉपिक:", value="भारतीय राज्यघटना (Indian Polity)")
     question_mode = st.radio(
         "प्रश्नों का प्रकार:",
         [
@@ -89,8 +88,8 @@ with tab1:
                     prompt = (
                         f"तुम एक अनुभवी MPSC शिक्षक हो। परीक्षा: {exam_type}, विषय: {subject}, "
                         f"प्रकार: {question_mode}, भाषा: {language}, प्रश्नों की संख्या: {num_questions}। "
-                        f"MPSC की शैली के अनुसार 'विधान अ, ब, क' वाले विश्लेषणात्मक प्रश्न बनाओ। "
-                        f"हर प्रश्न के ठीक 4 विकल्प दो और हर विकल्प की संक्षिप्त व्याख्या {language} भाषा में लिखो। "
+                        f"हर प्रश्न को 3 साफ हिस्सों में बांटो: question_intro (मुख्य भूमिका), statements (अ, ब, क विधाने अलग-अलग आइटम में), "
+                        f"और question_ask (मुख्य सवाल)। हर प्रश्न के ठीक 4 विकल्प (options) दो और हर विकल्प की संक्षिप्त व्याख्या {language} भाषा में लिखो। "
                         f"PYQ संदर्भ: {pyq_context if pyq_context else 'कोई PDF नहीं दी गई है।'}"
                     )
 
@@ -110,23 +109,41 @@ with tab1:
         st.divider()
         questions = st.session_state.quiz_data.questions
         correct_count = 0
+
         for idx, q in enumerate(questions):
-            st.subheader(f"प्रश्न {idx + 1}")
-            st.write(q.question)
-            option_labels = [opt.text for opt in q.options]
-            choice = st.radio(f"उत्तर चुनें (प्रश्न {idx + 1}):", option_labels, index=None, key=f"q_{idx}")
-            if choice is not None:
-                selected_idx = option_labels.index(choice)
-                if selected_idx == q.correct_index:
-                    st.success("✅ सही उत्तर!")
-                    correct_count += 1
-                else:
-                    st.error(f"❌ गलत उत्तर! सही विकल्प: {option_labels[q.correct_index]}")
-                with st.expander("📖 सभी विकल्पों का स्पष्टीकरण", expanded=True):
-                    for o_idx, opt in enumerate(q.options):
-                        mark = "✔️" if o_idx == q.correct_index else "✖️"
-                        st.markdown(f"**{mark} {opt.text}:** {opt.explanation}")
-            st.divider()
+            with st.container(border=True):
+                st.markdown(f"### 📌 प्रश्न {idx + 1}")
+                st.markdown(f"**{q.question_intro}**")
+
+                if q.statements:
+                    for stmt in q.statements:
+                        st.markdown(f"- {stmt}")
+
+                if q.question_ask:
+                    st.markdown(f"**{q.question_ask}**")
+
+                st.write("")
+                option_labels = [f"({i+1}) {opt.text}" for i, opt in enumerate(q.options)]
+                choice = st.radio(
+                    "अपना सही विकल्प चुनें:",
+                    option_labels,
+                    index=None,
+                    key=f"q_{idx}",
+                )
+
+                if choice is not None:
+                    selected_idx = option_labels.index(choice)
+                    if selected_idx == q.correct_index:
+                        st.success("✅ बिल्कुल सही उत्तर!")
+                        correct_count += 1
+                    else:
+                        st.error(f"❌ गलत उत्तर! सही विकल्प है: {option_labels[q.correct_index]}")
+
+                    with st.expander("📖 सभी विकल्पों का स्पष्टीकरण देखें", expanded=True):
+                        for o_idx, opt in enumerate(q.options):
+                            mark = "✔️" if o_idx == q.correct_index else "✖️"
+                            st.markdown(f"**{mark} ({o_idx+1}) {opt.text}:** {opt.explanation}")
+
         st.info(f"📊 वर्तमान स्कोर: **{correct_count} / {len(questions)}**")
 
 with tab2:
