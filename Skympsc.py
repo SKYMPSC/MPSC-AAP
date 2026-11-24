@@ -1,5 +1,7 @@
+import io
 import time
 import streamlit as st
+from gtts import gTTS
 from google import genai
 from google.genai import types
 from pydantic import BaseModel, Field
@@ -8,13 +10,13 @@ from pypdf import PdfReader
 st.set_page_config(page_title="SkyMPSC & SAAM AI", page_icon="📚", layout="centered")
 
 class OptionDetail(BaseModel):
-    text: str = Field(description="विकल्प का टेक्स्ट (बिना A/B/C प्रीफिक्स के)")
+    text: str = Field(description="विकल्प का टेक्स्ट (बिना 1/2/3 या A/B/C के)")
     explanation: str = Field(description="यह विकल्प सही या गलत क्यों है, इसकी संक्षिप्त व्याख्या")
 
 class QuestionItem(BaseModel):
-    question_intro: str = Field(description="प्रश्न की मुख्य पहली लाइन (जैसे: खालील विधाने विचारात घ्या:)")
+    question_intro: str = Field(description="प्रश्न की मुख्य पहली लाइन")
     statements: list[str] = Field(description="विधान अ, ब, क की अलग-अलग सूची। यदि विधान नहीं हैं तो खाली रखें []")
-    question_ask: str = Field(description="अंतिम सवाल (जैसे: वरीलपैकी कोणते विधान बरोबर आहे?)")
+    question_ask: str = Field(description="अंतिम सवाल")
     options: list[OptionDetail] = Field(description="ठीक 4 विकल्प")
     correct_index: int = Field(description="सही विकल्प का इंडेक्स (0, 1, 2, या 3)")
 
@@ -39,18 +41,32 @@ def generate_with_fallback(client, contents, config=None):
                 break
     raise last_error
 
+def text_to_audio(text, lang_code="hi"):
+    clean_text = text.replace("*", "").replace("#", "").replace("-", " ")[:1500]
+    tts = gTTS(text=clean_text, lang=lang_code, slow=False)
+    fp = io.BytesIO()
+    tts.write_to_fp(fp)
+    fp.seek(0)
+    return fp
+
 st.title("📚 SkyMPSC & SAAM AI")
-st.caption("MPSC परीक्षा तैयारी, सरकारी भर्ती अपडेट्स और आपका पर्सनल असिस्टेंट SAAM")
+st.caption("इंटरैक्टिव MPSC क्विज़, PDF ऑडियो रीडर और वॉयस असिस्टेंट SAAM")
 
 api_key = st.text_input("🔑 अपनी Gemini API Key डालें:", type="password")
 
-tab1, tab2, tab3 = st.tabs(["📝 MPSC टेस्ट", "🤖 SAAM असिस्टेंट", "📢 सरकारी भर्ती अलर्ट"])
+tab1, tab2, tab3, tab4 = st.tabs([
+    "📝 MPSC क्विज़",
+    "🤖 SAAM वॉयस असिस्टेंट",
+    "📄 PDF पढ़कर सुनें",
+    "📢 सरकारी भर्ती",
+])
 
 with tab1:
     uploaded_files = st.file_uploader(
         "📄 पुराने प्रश्नपत्र या नोट्स की PDF अपलोड करें (वैकल्पिक)",
         type=["pdf"],
         accept_multiple_files=True,
+        key="quiz_pdf",
     )
     exam_type = st.selectbox(
         "परीक्षा चुनें:",
@@ -70,12 +86,14 @@ with tab1:
 
     if "quiz_data" not in st.session_state:
         st.session_state.quiz_data = None
+    if "locked_answers" not in st.session_state:
+        st.session_state.locked_answers = {}
 
     if st.button("🚀 नया टेस्ट शुरू करें", type="primary", use_container_width=True):
         if not api_key:
             st.warning("⚠️ कृपया ऊपर अपनी Gemini API Key डालें और Enter दबाएं।")
         else:
-            with st.spinner("AI प्रश्न तैयार कर रहा है..."):
+            with st.spinner("AI आपके लिए इंटरैक्टिव प्रश्न तैयार कर रहा है..."):
                 try:
                     pyq_context = ""
                     if uploaded_files:
@@ -101,6 +119,7 @@ with tab1:
                     )
                     response = generate_with_fallback(client, prompt, config)
                     st.session_state.quiz_data = MPSCTest.model_validate_json(response.text)
+                    st.session_state.locked_answers = {}
                     st.rerun()
                 except Exception as e:
                     st.error(f"समस्या आई: {e}")
@@ -108,11 +127,12 @@ with tab1:
     if st.session_state.quiz_data:
         st.divider()
         questions = st.session_state.quiz_data.questions
+        total_q = len(questions)
         correct_count = 0
 
         for idx, q in enumerate(questions):
             with st.container(border=True):
-                st.markdown(f"### 📌 प्रश्न {idx + 1}")
+                st.markdown(f"### 📌 प्रश्न {idx + 1} / {total_q}")
                 st.markdown(f"**{q.question_intro}**")
 
                 if q.statements:
@@ -124,86 +144,81 @@ with tab1:
 
                 st.write("")
                 option_labels = [f"({i+1}) {opt.text}" for i, opt in enumerate(q.options)]
+                is_locked = idx in st.session_state.locked_answers
+                saved_idx = st.session_state.locked_answers.get(idx, None)
+
                 choice = st.radio(
-                    "अपना सही विकल्प चुनें:",
+                    "एक बार विकल्प चुनने के बाद उत्तर लॉक हो जाएगा:",
                     option_labels,
-                    index=None,
-                    key=f"q_{idx}",
+                    index=saved_idx,
+                    key=f"radio_q_{idx}",
+                    disabled=is_locked,
                 )
 
-                if choice is not None:
-                    selected_idx = option_labels.index(choice)
+                if choice is not None and not is_locked:
+                    st.session_state.locked_answers[idx] = option_labels.index(choice)
+                    st.rerun()
+
+                if is_locked:
+                    selected_idx = st.session_state.locked_answers[idx]
                     if selected_idx == q.correct_index:
-                        st.success("✅ बिल्कुल सही उत्तर!")
+                        st.success(f"✅ सही उत्तर! आपने चुना: {option_labels[selected_idx]}")
                         correct_count += 1
                     else:
-                        st.error(f"❌ गलत उत्तर! सही विकल्प है: {option_labels[q.correct_index]}")
+                        st.error(
+                            f"❌ गलत उत्तर! आपने चुना: {option_labels[selected_idx]} | "
+                            f"सही उत्तर है: {option_labels[q.correct_index]}"
+                        )
 
-                    with st.expander("📖 सभी विकल्पों का स्पष्टीकरण देखें", expanded=True):
+                    with st.expander("📖 सभी विकल्पों का विस्तृत विश्लेषण देखें", expanded=True):
                         for o_idx, opt in enumerate(q.options):
-                            mark = "✔️" if o_idx == q.correct_index else "✖️"
-                            st.markdown(f"**{mark} ({o_idx+1}) {opt.text}:** {opt.explanation}")
+                            if o_idx == q.correct_index:
+                                st.markdown(f"✔️ **({o_idx+1}) {opt.text} (सही):** {opt.explanation}")
+                            elif o_idx == selected_idx:
+                                st.markdown(f"❌ **({o_idx+1}) {opt.text} (आपका गलत चुनाव):** {opt.explanation}")
+                            else:
+                                st.markdown(f"✖️ **({o_idx+1}) {opt.text}:** {opt.explanation}")
 
-        st.info(f"📊 वर्तमान स्कोर: **{correct_count} / {len(questions)}**")
+        attempted = len(st.session_state.locked_answers)
+        if attempted == total_q:
+            percentage = round((correct_count / total_q) * 100, 1)
+            st.success(
+                f"🏆 **टेस्ट पूरा हुआ! आपका अंतिम स्कोर: {correct_count} / {total_q} ({percentage}%)**"
+            )
+        else:
+            st.info(f"📊 प्रगति: **{attempted} / {total_q}** प्रश्न हल किए गए | वर्तमान सही उत्तर: **{correct_count}**")
 
 with tab2:
-    st.subheader("🤖 SAAM - आपका पर्सनल असिस्टेंट")
+    st.subheader("🤖 SAAM - वॉयस और चैट असिस्टेंट")
+    voice_lang = st.selectbox("SAAM की आवाज़ की भाषा:", ["हिंदी (hi)", "मराठी (mr)", "English (en)"])
+    lang_code = voice_lang.split("(")[1].replace(")", "")
+
     if "saam_messages" not in st.session_state:
         st.session_state.saam_messages = [
-            {"role": "assistant", "content": "नमस्ते! मैं SAAM हूँ। आज मैं आपकी पढ़ाई, प्लानिंग या किसी भी काम में कैसे मदद कर सकता हूँ?"}
+            {"role": "assistant", "content": "नमस्ते! मैं SAAM हूँ। आप नीचे माइक दबाकर बोल सकते हैं या लिखकर पूछ सकते हैं।"}
         ]
 
-    for msg in st.session_state.saam_messages:
+    for i, msg in enumerate(st.session_state.saam_messages):
         with st.chat_message(msg["role"]):
             st.write(msg["content"])
+            if msg["role"] == "assistant" and "audio" in msg:
+                st.audio(msg["audio"], format="audio/mp3")
 
-    user_msg = st.chat_input("SAAM से कुछ भी पूछें या काम बताएं...")
-    if user_msg:
+    audio_val = st.audio_input("🎙️ माइक दबाकर बोलें (बोलने के बाद Stop दबाएं)")
+    text_val = st.chat_input("या यहाँ लिखकर SAAM से बात करें...")
+
+    if audio_val is not None or text_val:
         if not api_key:
             st.warning("⚠️ कृपया सबसे ऊपर अपनी Gemini API Key डालें।")
         else:
-            st.session_state.saam_messages.append({"role": "user", "content": user_msg})
-            with st.chat_message("user"):
-                st.write(user_msg)
+            client = genai.Client(api_key=api_key.strip())
+            user_prompt_text = text_val
 
-            with st.chat_message("assistant"):
-                with st.spinner("SAAM सोच रहा है..."):
-                    try:
-                        client = genai.Client(api_key=api_key.strip())
-                        history_text = "\n".join(
-                            [f"{m['role']}: {m['content']}" for m in st.session_state.saam_messages[-8:]]
-                        )
-                        saam_prompt = (
-                            "तुम्हारा नाम SAAM है। तुम एक समझदार, दोस्ताना और मददगार पर्सनल AI असिस्टेंट हो। "
-                            "तुम इंसान की तरह स्वाभाविक भाषा (हिंदी, मराठी या English—जिस भाषा में यूज़र बात करे) में बात करते हो, "
-                            "पिछली बातचीत को याद रखते हो और यूज़र के हर आदेश या सवाल का सटीक और व्यावहारिक जवाब देते हो।\n\n"
-                            f"पिछली बातचीत:\n{history_text}\n\nSAAM का जवाब:"
-                        )
-                        res = generate_with_fallback(client, saam_prompt)
-                        reply = res.text
-                        st.write(reply)
-                        st.session_state.saam_messages.append({"role": "assistant", "content": reply})
-                    except Exception as e:
-                        st.error(f"SAAM को समस्या आई: {e}")
-
-with tab3:
-    st.subheader("📢 सरकारी भर्ती (Govt Vacancy) अपडेट्स")
-    dept = st.selectbox(
-        "विभाग चुनें:",
-        ["MPSC (राज्यसेवा व गट ब/क)", "महाराष्ट्र पोलीस भरती", "तलाठी व जिल्हा परिषद भरती", "UPSC / SSC / बँकिंग"],
-    )
-    if st.button("🔍 ताज़ा भर्ती जानकारी देखें", use_container_width=True):
-        if not api_key:
-            st.warning("⚠️ कृपया सबसे ऊपर अपनी Gemini API Key डालें।")
-        else:
-            with st.spinner("भर्ती की जानकारी निकाली जा रही है..."):
-                try:
-                    client = genai.Client(api_key=api_key.strip())
-                    vac_prompt = (
-                        f"मुझे {dept} की प्रमुख परीक्षाओं, पात्रता, आयु सीमा, चयन प्रक्रिया और "
-                        f"आधिकारिक वेबसाइट की पूरी जानकारी सरल हिंदी/मराठी में बिंदुवार बताएं।"
-                    )
-                    res = generate_with_fallback(client, vac_prompt)
-                    st.markdown(res.text)
-                except Exception as e:
-                    st.error(f"समस्या आई: {e}")
+            if audio_val is not None and not text_val:
+                audio_bytes = audio_val.getvalue()
+                if st.session_state.get("last_audio") != audio_bytes:
+                    st.session_state.last_audio = audio_bytes
+                    with st.spinner("आपकी आवाज़ समझी जा रही है..."):
+                        audio_part = types.Part.from_bytes(data=audio_bytes, mime_type="audio/wav")
+                        transcribe_res = generate_with_fallback(
+                            client,
