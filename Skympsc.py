@@ -28,11 +28,7 @@ def generate_with_fallback(client, contents, config=None):
     for model_name in ["gemini-3.5-flash-lite", "gemini-3.8-flash", "gemini-3.5-flash"]:
         for _ in range(2):
             try:
-                return client.models.generate_content(
-                    model=model_name,
-                    contents=contents,
-                    config=config,
-                )
+                return client.models.generate_content(model=model_name, contents=contents, config=config)
             except Exception as err:
                 last_error = err
                 if "503" in str(err) or "UNAVAILABLE" in str(err):
@@ -40,6 +36,13 @@ def generate_with_fallback(client, contents, config=None):
                     continue
                 break
     raise last_error
+
+def get_lang_code(label):
+    if "मराठी" in label:
+        return "mr"
+    if "English" in label:
+        return "en"
+    return "hi"
 
 def text_to_audio(text, lang_code="hi"):
     clean_text = text.replace("*", "").replace("#", "").replace("-", " ")[:1500]
@@ -50,7 +53,7 @@ def text_to_audio(text, lang_code="hi"):
     return fp
 
 st.title("📚 SkyMPSC & SAAM AI")
-st.caption("इंटरैक्टिव MPSC क्विज़, PDF ऑडियो रीडर और वॉयस असिस्टेंट SAAM")
+st.caption("संपूर्ण MPSC परीक्षा तैयारी, PDF ऑडियो रीडर, सरकारी भर्ती अपडेट्स और SAAM वॉयस असिस्टेंट")
 
 api_key = st.text_input("🔑 अपनी Gemini API Key डालें:", type="password")
 
@@ -62,17 +65,25 @@ tab1, tab2, tab3, tab4 = st.tabs([
 ])
 
 with tab1:
-    uploaded_files = st.file_uploader(
-        "📄 पुराने प्रश्नपत्र या नोट्स की PDF अपलोड करें (वैकल्पिक)",
-        type=["pdf"],
-        accept_multiple_files=True,
-        key="quiz_pdf",
+    uploaded_files = st.file_uploader("📄 पुराने प्रश्नपत्र या नोट्स की PDF अपलोड करें (वैकल्पिक)", type=["pdf"], accept_multiple_files=True, key="quiz_pdf")
+    exam_type = st.selectbox("परीक्षा चुनें:", ["MPSC Rajyaseva (राज्यसेवा)", "MPSC Combine Group B & C (संयुक्त गट ब व क)", "MPSC Technical / Engineering"])
+    
+    subject_choice = st.selectbox(
+        "विषय चुनें:",
+        [
+            "भारतीय राज्यघटना व पंचायत राज (Polity)",
+            "महाराष्ट्राचा व भारताचा इतिहास (History)",
+            "महाराष्ट्र व भारताचा भूगोल (Geography)",
+            "भारतीय अर्थव्यवस्था (Economics)",
+            "सामान्य विज्ञान व तंत्रज्ञान (Science & Tech)",
+            "चालू घडामोडी (Current Affairs)",
+            "बुद्धिमत्ता चाचणी व अंकगणित (CSAT)",
+            "अन्य कस्टम विषय (नीचे टाइप करें)",
+        ],
     )
-    exam_type = st.selectbox(
-        "परीक्षा चुनें:",
-        ["MPSC Rajyaseva (राज्यसेवा)", "MPSC Combine Group B & C (संयुक्त गट ब व क)", "MPSC Technical / Engineering"],
-    )
-    subject = st.text_input("विषय / टॉपिक:", value="भारतीय राज्यघटना (Indian Polity)")
+    custom_subject = st.text_input("यदि ऊपर 'अन्य' चुना है या कोई खास टॉपिक चाहिए, तो यहाँ लिखें:", value="")
+    final_subject = custom_subject.strip() if custom_subject.strip() else subject_choice
+
     question_mode = st.radio(
         "प्रश्नों का प्रकार:",
         [
@@ -93,7 +104,7 @@ with tab1:
         if not api_key:
             st.warning("⚠️ कृपया ऊपर अपनी Gemini API Key डालें और Enter दबाएं।")
         else:
-            with st.spinner("AI आपके लिए इंटरैक्टिव प्रश्न तैयार कर रहा है..."):
+            with st.spinner("AI आपके लिए MPSC पैटर्न के प्रश्न तैयार कर रहा है..."):
                 try:
                     pyq_context = ""
                     if uploaded_files:
@@ -104,19 +115,16 @@ with tab1:
                         pyq_context = pyq_context[:12000]
 
                     prompt = (
-                        f"तुम एक अनुभवी MPSC शिक्षक हो। परीक्षा: {exam_type}, विषय: {subject}, "
+                        f"तुम एक अनुभवी MPSC शिक्षक हो। परीक्षा: {exam_type}, विषय: {final_subject}, "
                         f"प्रकार: {question_mode}, भाषा: {language}, प्रश्नों की संख्या: {num_questions}। "
-                        f"हर प्रश्न को 3 साफ हिस्सों में बांटो: question_intro (मुख्य भूमिका), statements (अ, ब, क विधाने अलग-अलग आइटम में), "
-                        f"और question_ask (मुख्य सवाल)। हर प्रश्न के ठीक 4 विकल्प (options) दो और हर विकल्प की संक्षिप्त व्याख्या {language} भाषा में लिखो। "
+                        f"MPSC परीक्षा के स्तर के अनुसार प्रश्न बनाओ और हर प्रश्न को 3 साफ हिस्सों में बांटो: "
+                        f"question_intro (मुख्य भूमिका), statements (विधान अ, ब, क की अलग-अलग सूची), और question_ask (मुख्य सवाल)। "
+                        f"हर प्रश्न के ठीक 4 विकल्प (options) दो और हर विकल्प की संक्षिप्त व्याख्या {language} भाषा में लिखो। "
                         f"PYQ संदर्भ: {pyq_context if pyq_context else 'कोई PDF नहीं दी गई है।'}"
                     )
 
                     client = genai.Client(api_key=api_key.strip())
-                    config = types.GenerateContentConfig(
-                        response_mime_type="application/json",
-                        response_schema=MPSCTest,
-                        temperature=0.4,
-                    )
+                    config = types.GenerateContentConfig(response_mime_type="application/json", response_schema=MPSCTest, temperature=0.4)
                     response = generate_with_fallback(client, prompt, config)
                     st.session_state.quiz_data = MPSCTest.model_validate_json(response.text)
                     st.session_state.locked_answers = {}
@@ -165,10 +173,7 @@ with tab1:
                         st.success(f"✅ सही उत्तर! आपने चुना: {option_labels[selected_idx]}")
                         correct_count += 1
                     else:
-                        st.error(
-                            f"❌ गलत उत्तर! आपने चुना: {option_labels[selected_idx]} | "
-                            f"सही उत्तर है: {option_labels[q.correct_index]}"
-                        )
+                        st.error(f"❌ गलत उत्तर! आपने चुना: {option_labels[selected_idx]} | सही उत्तर है: {option_labels[q.correct_index]}")
 
                     with st.expander("📖 सभी विकल्पों का विस्तृत विश्लेषण देखें", expanded=True):
                         for o_idx, opt in enumerate(q.options):
@@ -182,23 +187,19 @@ with tab1:
         attempted = len(st.session_state.locked_answers)
         if attempted == total_q:
             percentage = round((correct_count / total_q) * 100, 1)
-            st.success(
-                f"🏆 **टेस्ट पूरा हुआ! आपका अंतिम स्कोर: {correct_count} / {total_q} ({percentage}%)**"
-            )
+            st.success(f"🏆 **टेस्ट पूरा हुआ! आपका अंतिम स्कोर: {correct_count} / {total_q} ({percentage}%)**")
         else:
             st.info(f"📊 प्रगति: **{attempted} / {total_q}** प्रश्न हल किए गए | वर्तमान सही उत्तर: **{correct_count}**")
 
 with tab2:
     st.subheader("🤖 SAAM - वॉयस और चैट असिस्टेंट")
-    voice_lang = st.selectbox("SAAM की आवाज़ की भाषा:", ["हिंदी (hi)", "मराठी (mr)", "English (en)"])
-    lang_code = voice_lang.split("(")[1].replace(")", "")
+    voice_lang = st.selectbox("SAAM की आवाज़ की भाषा:", ["हिंदी", "मराठी", "English"])
+    lang_code = get_lang_code(voice_lang)
 
     if "saam_messages" not in st.session_state:
-        st.session_state.saam_messages = [
-            {"role": "assistant", "content": "नमस्ते! मैं SAAM हूँ। आप नीचे माइक दबाकर बोल सकते हैं या लिखकर पूछ सकते हैं।"}
-        ]
+        st.session_state.saam_messages = [{"role": "assistant", "content": "नमस्ते! मैं SAAM हूँ। आप नीचे माइक दबाकर बोल सकते हैं या लिखकर कुछ भी पूछ सकते हैं।"}]
 
-    for i, msg in enumerate(st.session_state.saam_messages):
+    for msg in st.session_state.saam_messages:
         with st.chat_message(msg["role"]):
             st.write(msg["content"])
             if msg["role"] == "assistant" and "audio" in msg:
@@ -216,9 +217,3 @@ with tab2:
 
             if audio_val is not None and not text_val:
                 audio_bytes = audio_val.getvalue()
-                if st.session_state.get("last_audio") != audio_bytes:
-                    st.session_state.last_audio = audio_bytes
-                    with st.spinner("आपकी आवाज़ समझी जा रही है..."):
-                        audio_part = types.Part.from_bytes(data=audio_bytes, mime_type="audio/wav")
-                        transcribe_res = generate_with_fallback(
-                            client,
